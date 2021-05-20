@@ -15,6 +15,8 @@
 package dev
 
 import (
+	"fmt"
+
 	"gvisor.dev/gvisor/pkg/abi/linux"
 	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/hostarch"
@@ -85,6 +87,15 @@ func (n *netTunFileOperations) Release(ctx context.Context) {
 	n.device.Release(ctx)
 }
 
+func isIfaceNameExists(name string, stack *netstack.Stack) bool {
+	for _, iface := range stack.Interfaces() {
+		if iface.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 // Ioctl implements fs.FileOperations.Ioctl.
 func (n *netTunFileOperations) Ioctl(ctx context.Context, file *fs.File, io usermem.IO, args arch.SyscallArguments) (uintptr, error) {
 	request := args[1].Uint()
@@ -115,6 +126,35 @@ func (n *netTunFileOperations) Ioctl(ctx context.Context, file *fs.File, io user
 		if err != nil {
 			return 0, err
 		}
+
+		if req.Name() == "" {
+			var prefix_fmt string
+			if flags.TUN {
+				prefix_fmt = "tun%d"
+			} else if flags.TAP {
+				prefix_fmt = "tap%d"
+			} else {
+				return 0, syserror.EINVAL
+			}
+
+			for i := 0; i < len(stack.Interfaces())+1; i++ {
+				dev := fmt.Sprintf(prefix_fmt, i)
+				if !isIfaceNameExists(dev, stack) {
+					req.SetName(dev)
+					break
+				}
+			}
+
+			if req.Name() == "" || isIfaceNameExists(req.Name(), stack) {
+				return 0, syserror.EINVAL
+			}
+
+			_, err := req.CopyOut(t, data)
+			if err != nil {
+				return 0, err
+			}
+		}
+
 		return 0, n.device.SetIff(stack.Stack, req.Name(), flags)
 
 	case linux.TUNGETIFF:
