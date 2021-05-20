@@ -23,6 +23,7 @@
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <cstring>
 
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
@@ -490,5 +491,36 @@ TEST_F(TuntapTest, WriteHangBug155928773) {
   write(sock, "hello", 5);
 }
 
+// EmptyInterfaceName tests empty interface name at creation of tun/tap.
+TEST_F(TuntapTest, EmptyInterfaceName) {
+  SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_ADMIN)));
+
+  FileDescriptor sender = ASSERT_NO_ERRNO_AND_VALUE(
+      Socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, IPPROTO_TCP));
+
+  char* empty_name = "";
+  struct ifreq ifr_set = {};
+
+  // Interface creation.
+  ASSIGN_OR_RETURN_ERRNO(FileDescriptor fd, Open(kDevNetTun, O_RDWR));
+
+  std::memset(&ifr_set, 0x0, sizeof(ifr_set));
+  ifr_set.ifr_flags = IFF_TAP;
+  strncpy(ifr_set.ifr_name, dev_name.c_str(), IFNAMSIZ);
+  if (ioctl(fd.get(), TUNSETIFF, &ifr_set) < 0) {
+    return PosixError(errno);
+  }
+  EXPECT_TRUE(0 == std::memcmp(ifr_set.ifr_name, "tap", sizeof("tap") - 1));
+  EXPECT_TRUE(ifr_set.ifr_name[IFNAMSIZ-1] == '\0');
+
+  std::memset(&ifr_set, 0x0, sizeof(ifr_set));
+  ifr_set.ifr_flags = IFF_TUN;
+  strncpy(ifr_set.ifr_name, dev_name.c_str(), IFNAMSIZ);
+  if (ioctl(fd.get(), TUNSETIFF, &ifr_set) < 0) {
+    return PosixError(errno);
+  }
+  EXPECT_TRUE(0 == std::memcmp(ifr_set.ifr_name, "tun", sizeof("tun") - 1));
+  EXPECT_TRUE(ifr_set.ifr_name[IFNAMSIZ-1] == '\0');
+}
 }  // namespace testing
 }  // namespace gvisor

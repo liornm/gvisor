@@ -87,7 +87,7 @@ func (n *netTunFileOperations) Release(ctx context.Context) {
 	n.device.Release(ctx)
 }
 
-func isIfaceNameExists(name string, stack *netstack.Stack) bool {
+func ifaceNameExists(name string, stack *netstack.Stack) bool {
 	for _, iface := range stack.Interfaces() {
 		if iface.Name == name {
 			return true
@@ -128,31 +128,37 @@ func (n *netTunFileOperations) Ioctl(ctx context.Context, file *fs.File, io user
 		}
 
 		if req.Name() == "" {
-			var prefix_fmt string
+			var prefixFmt string
 			if flags.TUN {
-				prefix_fmt = "tun%d"
+				prefixFmt = "tun%d"
 			} else if flags.TAP {
-				prefix_fmt = "tap%d"
+				prefixFmt = "tap%d"
 			} else {
 				return 0, syserror.EINVAL
 			}
 
 			for i := 0; i < len(stack.Interfaces())+1; i++ {
-				dev := fmt.Sprintf(prefix_fmt, i)
-				if !isIfaceNameExists(dev, stack) {
+				dev := fmt.Sprintf(prefixFmt, i)
+				if !ifaceNameExists(dev, stack) {
 					req.SetName(dev)
 					break
 				}
 			}
 
-			if req.Name() == "" || isIfaceNameExists(req.Name(), stack) {
-				return 0, syserror.EINVAL
-			}
-
+			// Populate if_name with the new name: Note that the character pointer becomes
+			// overwritten with the real device name (e.g. "tun0")
 			_, err := req.CopyOut(t, data)
 			if err != nil {
 				return 0, err
 			}
+		}
+
+		// Note that this check is also required if req.Name() == "",
+		// in case the %d somehow exceeds the buffer size and therefore "chopped"
+		// to the buffer length, which causes the resulted name to be equal to an existed
+		// interface name.
+		if ifaceNameExists(req.Name(), stack) {
+			return 0, syserror.EINVAL
 		}
 
 		return 0, n.device.SetIff(stack.Stack, req.Name(), flags)
