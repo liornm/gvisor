@@ -433,6 +433,32 @@ func (s *Stack) RouteTable() []inet.Route {
 	return routeTable
 }
 
+// AddRoute implements inet.Stack.AddRoute.
+func (s *Stack) AddRoute(route inet.Route) error {
+	mask := make([]byte, len(route.DstAddr))
+	for i := uint8(0); i < route.DstLen; i++ {
+		mask[i / 8] <<= 1
+		mask[i / 8] |= 1
+	}
+	address := tcpip.AddressWithPrefix{
+		Address:   tcpip.Address(route.DstAddr),
+		PrefixLen: int(route.DstLen),
+	}
+	rt := tcpip.Route {
+		Destination: address.Subnet(),
+		Gateway:     tcpip.Address(route.GatewayAddr),
+		NIC:         tcpip.NICID(route.OutputInterface),
+	}
+
+	switch s.Stack.AddRoute(rt).(type) {
+	case *tcpip.ErrInvalidGateway:
+		return syserr.ErrInvalidArgument.ToError()
+	case *tcpip.ErrRouteAlreadyExists:
+		return syserr.ErrExists.ToError()
+	}
+	return nil
+}
+
 // IPTables returns the stack's iptables.
 func (s *Stack) IPTables() (*stack.IPTables, error) {
 	return s.Stack.IPTables(), nil
