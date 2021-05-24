@@ -552,4 +552,30 @@ func (*ErrWouldBlock) IgnoreStats() bool {
 }
 func (*ErrWouldBlock) String() string { return "operation would block" }
 
+// ErrRouteAlreadyExists indicates an attempt to add route that already exists in the route table.
+//
+// +stateify savable
+type ErrRouteAlreadyExists struct{}
+
+func (*ErrRouteAlreadyExists) isError() {}
+
+// IgnoreStats implements Error.
+func (*ErrRouteAlreadyExists) IgnoreStats() bool {
+	return true
+}
+func (*ErrRouteAlreadyExists) String() string { return "Route already exists in the route table" }
+
+// ErrInvalidGateway indicates an attempt to add route with invalid gateway.
+//
+// +stateify savable
+type ErrInvalidGateway struct{}
+
+func (*ErrInvalidGateway) isError() {}
+
+// IgnoreStats implements Error.
+func (*ErrInvalidGateway) IgnoreStats() bool {
+	return true
+}
+func (*ErrInvalidGateway) String() string { return "Invalid gateway in route" }
+
 // LINT.ThenChange(../syserr/netstack.go)
