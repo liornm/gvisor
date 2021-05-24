@@ -580,11 +580,23 @@ func (s *Stack) GetRouteTable() []tcpip.Route {
 	return append([]tcpip.Route(nil), s.route.mu.table...)
 }
 
-// AddRoute appends a route to the route table.
-func (s *Stack) AddRoute(route tcpip.Route) {
+// AppendTCPIPRoute appends a route to the route table.
+func (s *Stack) AppendTCPIPRoute(route tcpip.Route) {
+	s.AddTCPIPRoute(int32(len(s.route.mu.table)), route)
+}
+
+// AddTCPIPRoute Add a route to the route table in a specific index.
+func (s *Stack) AddTCPIPRoute(idx int32, route tcpip.Route) *tcpip.Route {
 	s.route.mu.Lock()
 	defer s.route.mu.Unlock()
-	s.route.mu.table = append(s.route.mu.table, route)
+	if  idx > int32(len(s.route.mu.table)) {
+		return nil
+	} else if int32(len(s.route.mu.table)) == idx {
+		s.route.mu.table = append(s.route.mu.table, route)
+	}
+	s.route.mu.table = append(s.route.mu.table[:idx+1], s.route.mu.table[idx:]...)
+	s.route.mu.table[idx] = route
+	return &s.route.mu.table[idx]
 }
 
 // RemoveRoutes removes matching routes from the route table.

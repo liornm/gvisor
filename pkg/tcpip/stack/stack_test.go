@@ -3835,7 +3835,7 @@ func TestGetMainNICAddressWhenNICDisabled(t *testing.T) {
 	}
 }
 
-// TestAddRoute tests Stack.AddRoute
+// TestAddRoute tests Stack.AppendTCPIPRoute
 func TestAddRoute(t *testing.T) {
 	const nicID = 1
 
@@ -3860,7 +3860,7 @@ func TestAddRoute(t *testing.T) {
 	s.SetRouteTable([]tcpip.Route{expected[0]})
 
 	// Add another route.
-	s.AddRoute(expected[1])
+	s.AppendTCPIPRoute(expected[1])
 
 	rt := s.GetRouteTable()
 	if got, want := len(rt), len(expected); got != want {
