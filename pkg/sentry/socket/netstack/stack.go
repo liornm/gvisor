@@ -167,7 +167,7 @@ func (s *Stack) AddInterfaceAddr(idx int32, addr inet.InterfaceAddr) error {
 	}
 
 	// Local route does not exist yet. Add it.
-	s.Stack.AddRoute(localRoute)
+	s.Stack.AddTCPIPRoute(localRoute)
 
 	return nil
 }
@@ -431,6 +431,32 @@ func (s *Stack) RouteTable() []inet.Route {
 	}
 
 	return routeTable
+}
+
+// AddRoute adds route to the route table at index idx.
+func (s *Stack) AddRoute(route inet.Route) error {
+	mask := make([]byte, len(route.DstAddr))
+	for i := uint8(0); i < route.DstLen; i++ {
+		mask[i / 8] <<= 1
+		mask[i / 8] |= 1
+	}
+	address := tcpip.AddressWithPrefix{
+		Address:   tcpip.Address(route.DstAddr),
+		PrefixLen: int(route.DstLen),
+	}
+	rt := tcpip.Route {
+		Destination: address.Subnet(),
+		Gateway:     tcpip.Address(route.GatewayAddr),
+		NIC:         tcpip.NICID(route.OutputInterface),
+	}
+
+	switch s.Stack.AddTCPIPRoute(rt).(type) {
+	case *tcpip.ErrInvalidGateway:
+		return syserr.ErrInvalidArgument.ToError()
+	case *tcpip.ErrRouteAlreadyExists:
+		return syserr.ErrExists.ToError()
+	}
+	return nil
 }
 
 // IPTables returns the stack's iptables.

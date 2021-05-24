@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"io"
 	mathrand "math/rand"
+	"sort"
 	"sync/atomic"
 	"time"
 
@@ -568,9 +569,12 @@ func (s *Stack) SetPortRange(start uint16, end uint16) tcpip.Error {
 //
 // This method takes ownership of the table.
 func (s *Stack) SetRouteTable(table []tcpip.Route) {
-	s.route.mu.Lock()
-	defer s.route.mu.Unlock()
+	s.route.mu.RLock()
+	defer s.route.mu.RUnlock()
 	s.route.mu.table = table
+	sort.Slice(s.route.mu.table, func(i, j int) bool {
+		return s.route.mu.table[i].Destination.Prefix() < s.route.mu.table[j].Destination.Prefix()
+	})
 }
 
 // GetRouteTable returns the route table which is currently in use.
@@ -580,11 +584,52 @@ func (s *Stack) GetRouteTable() []tcpip.Route {
 	return append([]tcpip.Route(nil), s.route.mu.table...)
 }
 
-// AddRoute appends a route to the route table.
-func (s *Stack) AddRoute(route tcpip.Route) {
+func (s *Stack) findRouteNic(route tcpip.Route) tcpip.NICID {
+	var ProtocolNumber tcpip.NetworkProtocolNumber
+	if len(route.Gateway) == 6 {
+		ProtocolNumber = header.IPv6ProtocolNumber
+	} else if len(route.Gateway) == 4 {
+		ProtocolNumber = header.IPv4ProtocolNumber
+	} else {
+		return tcpip.NICID(-1)
+	}
+	for _, nic := range s.nics {
+		ep := nic.networkEndpoints[ProtocolNumber].(AddressableEndpoint)
+		for _, addr := range ep.PrimaryAddresses() {
+			subnet := addr.Subnet()
+			if subnet.Contains(route.Gateway) {
+				return nic.id
+			}
+		}
+	}
+	return tcpip.NICID(-1)
+}
+
+// AddTCPIPRoute appends a route to the route table.
+func (s *Stack) AddTCPIPRoute(route tcpip.Route) tcpip.Error {
+	nicID := tcpip.NICID(-1)
+	if len(route.Gateway) != 0 {
+		nicID = s.findRouteNic(route)
+	} else if _, ok := s.nics[route.NIC]; ok {
+		nicID = route.NIC
+	}
+	if nicID == tcpip.NICID(-1) {
+		return &tcpip.ErrInvalidGateway{}
+	}
+	route.NIC = nicID
+
 	s.route.mu.Lock()
 	defer s.route.mu.Unlock()
-	s.route.mu.table = append(s.route.mu.table, route)
+	index := sort.Search(len(s.route.mu.table), func(i int) bool {
+		return route.Destination.Prefix() <= s.route.mu.table[i].Destination.Prefix()
+	})
+	if index < len(s.route.mu.table) && s.route.mu.table[index] == route {
+		return &tcpip.ErrRouteAlreadyExists{}
+	}
+	s.route.mu.table = append(s.route.mu.table, tcpip.Route{})
+	copy(s.route.mu.table[index+1:], s.route.mu.table[index:])
+	s.route.mu.table[index] = route
+	return nil
 }
 
 // RemoveRoutes removes matching routes from the route table.
@@ -1153,8 +1198,8 @@ func (s *Stack) FindRoute(id tcpip.NICID, localAddr, remoteAddr tcpip.Address, n
 	if r := func() *Route {
 		s.route.mu.RLock()
 		defer s.route.mu.RUnlock()
-
-		for _, route := range s.route.mu.table {
+		for i := len(s.route.mu.table)-1; i >= 0; i-- {
+			route := s.route.mu.table[i]
 			if len(remoteAddr) != 0 && !route.Destination.Contains(remoteAddr) {
 				continue
 			}
