@@ -470,14 +470,8 @@ func (s *Stack) RouteTable() []inet.Route {
 }
 
 // AddRoute implements inet.Stack.AddRoute.
-func (s *Stack) AddRoute(idx int32, route inet.Route) error {
-	if  idx > int32(len(s.routes)) {
-		return fmt.Errorf("AddRoute: index our of range")
-	} else if int32(len(s.routes)) == idx {
-		s.routes = append(s.routes, route)
-	}
-	s.routes = append(s.routes[:idx+1], s.routes[idx:]...)
-	s.routes[idx] = route
+func (s *Stack) AddRoute(route inet.Route) error {
+	s.routes = append(s.routes, route)
 	return nil
 }
 

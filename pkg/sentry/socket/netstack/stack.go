@@ -167,7 +167,7 @@ func (s *Stack) AddInterfaceAddr(idx int32, addr inet.InterfaceAddr) error {
 	}
 
 	// Local route does not exist yet. Add it.
-	s.Stack.AppendTCPIPRoute(localRoute)
+	s.Stack.AddTCPIPRoute(localRoute)
 
 	return nil
 }
@@ -434,7 +434,7 @@ func (s *Stack) RouteTable() []inet.Route {
 }
 
 // AddRoute adds route to the route table at index idx.
-func (s *Stack) AddRoute(idx int32, route inet.Route) error {
+func (s *Stack) AddRoute(route inet.Route) error {
 	mask := make([]byte, len(route.DstAddr))
 	for i := uint8(0); i < route.DstLen; i++ {
 		mask[i / 8] <<= 1
@@ -449,8 +449,12 @@ func (s *Stack) AddRoute(idx int32, route inet.Route) error {
 		Gateway:     tcpip.Address(route.GatewayAddr),
 		NIC:         tcpip.NICID(route.OutputInterface),
 	}
-	if s.Stack.AddTCPIPRoute(idx, rt) == nil {
-		return fmt.Errorf("AddRoute: Failed to add route at index %d", idx)
+
+	switch s.Stack.AddTCPIPRoute(rt).(type) {
+	case *tcpip.ErrInvalidGateway:
+		return syserr.ErrInvalidArgument.ToError()
+	case *tcpip.ErrRouteAlreadyExists:
+		return syserr.ErrExists.ToError()
 	}
 	return nil
 }

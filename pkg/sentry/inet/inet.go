@@ -76,7 +76,7 @@ type Stack interface {
 	RouteTable() []Route
 
 	// AddRoute adds route to the route table at index idx.
-	AddRoute(idx int32, route Route) error
+	AddRoute(route Route) error
 
 	// Resume restarts the network stack after restore.
 	Resume()

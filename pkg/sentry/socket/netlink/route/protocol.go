@@ -556,10 +556,11 @@ func (p *Protocol) newRoute(ctx context.Context, msg *netlink.Message, ms *netli
 		}
 		attHdr, buff, rest, ok = rest.ParseFirst()
 	}
-
-	err := stack.AddRoute(0, route)
+	err := stack.AddRoute(route)
 	if err != nil {
-		// Adding route failed
+		if err.Error() == syserr.ErrExists.String() {
+			return syserr.ErrExists
+		}
 		return syserr.ErrInvalidArgument
 	}
 	return nil
