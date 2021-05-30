@@ -16,17 +16,16 @@ package udp_test
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"io/ioutil"
 	"math/rand"
 	"testing"
-	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip/checker"
+	"gvisor.dev/gvisor/pkg/tcpip/faketime"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/link/channel"
 	"gvisor.dev/gvisor/pkg/tcpip/link/loopback"
@@ -298,16 +297,18 @@ type testContext struct {
 
 func newDualTestContext(t *testing.T, mtu uint32) *testContext {
 	t.Helper()
-	return newDualTestContextWithOptions(t, mtu, stack.Options{
-		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol, ipv6.NewProtocol},
-		TransportProtocols: []stack.TransportProtocolFactory{udp.NewProtocol, icmp.NewProtocol6, icmp.NewProtocol4},
-		HandleLocal:        true,
-	})
+	return newDualTestContextWithHandleLocal(t, mtu, true)
 }
 
-func newDualTestContextWithOptions(t *testing.T, mtu uint32, options stack.Options) *testContext {
+func newDualTestContextWithHandleLocal(t *testing.T, mtu uint32, handleLocal bool) *testContext {
 	t.Helper()
 
+	options := stack.Options{
+		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol, ipv6.NewProtocol},
+		TransportProtocols: []stack.TransportProtocolFactory{udp.NewProtocol, icmp.NewProtocol6, icmp.NewProtocol4},
+		HandleLocal:        handleLocal,
+		Clock:              &faketime.NullClock{},
+	}
 	s := stack.New(options)
 	ep := channel.New(256, mtu, "")
 	wep := stack.LinkEndpoint(ep)
@@ -378,9 +379,7 @@ func (c *testContext) createEndpointForFlow(flow testFlow) {
 func (c *testContext) getPacketAndVerify(flow testFlow, checkers ...checker.NetworkChecker) []byte {
 	c.t.Helper()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	p, ok := c.linkEP.ReadContext(ctx)
+	p, ok := c.linkEP.Read()
 	if !ok {
 		c.t.Fatalf("Packet wasn't written out")
 		return nil
@@ -534,7 +533,9 @@ func newMinPayload(minSize int) []byte {
 func TestBindToDeviceOption(t *testing.T) {
 	s := stack.New(stack.Options{
 		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol},
-		TransportProtocols: []stack.TransportProtocolFactory{udp.NewProtocol}})
+		TransportProtocols: []stack.TransportProtocolFactory{udp.NewProtocol},
+		Clock:              &faketime.NullClock{},
+	})
 
 	ep, err := s.NewEndpoint(udp.ProtocolNumber, ipv4.ProtocolNumber, &waiter.Queue{})
 	if err != nil {
@@ -606,7 +607,7 @@ func testReadInternal(c *testContext, flow testFlow, packetShouldBeDropped, expe
 		case <-ch:
 			res, err = c.ep.Read(&buf, tcpip.ReadOptions{NeedRemoteAddr: true})
 
-		case <-time.After(300 * time.Millisecond):
+		default:
 			if packetShouldBeDropped {
 				return // expected to time out
 			}
@@ -820,11 +821,7 @@ func TestV4ReadSelfSource(t *testing.T) {
 		{"NoHandleLocal", true, &tcpip.ErrWouldBlock{}, 1},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			c := newDualTestContextWithOptions(t, defaultMTU, stack.Options{
-				NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol, ipv6.NewProtocol},
-				TransportProtocols: []stack.TransportProtocolFactory{udp.NewProtocol},
-				HandleLocal:        tt.handleLocal,
-			})
+			c := newDualTestContextWithHandleLocal(t, defaultMTU, tt.handleLocal)
 			defer c.cleanup()
 
 			c.createEndpointForFlow(unicastV4)
@@ -1034,17 +1031,17 @@ func testWriteAndVerifyInternal(c *testContext, flow testFlow, setDest bool, che
 	payload := testWriteNoVerify(c, flow, setDest)
 	// Received the packet and check the payload.
 	b := c.getPacketAndVerify(flow, checkers...)
-	var udp header.UDP
+	var udpH header.UDP
 	if flow.isV4() {
-		udp = header.UDP(header.IPv4(b).Payload())
+		udpH = header.IPv4(b).Payload()
 	} else {
-		udp = header.UDP(header.IPv6(b).Payload())
+		udpH = header.IPv6(b).Payload()
 	}
-	if !bytes.Equal(payload, udp.Payload()) {
-		c.t.Fatalf("Bad payload: got %x, want %x", udp.Payload(), payload)
+	if !bytes.Equal(payload, udpH.Payload()) {
+		c.t.Fatalf("Bad payload: got %x, want %x", udpH.Payload(), payload)
 	}
 
-	return udp.SourcePort()
+	return udpH.SourcePort()
 }
 
 func testDualWrite(c *testContext) uint16 {
@@ -1198,7 +1195,7 @@ func TestWriteOnConnectedInvalidPort(t *testing.T) {
 			r.Reset(payload)
 			n, err := c.ep.Write(&r, writeOpts)
 			if err != nil {
-				c.t.Fatalf("c.ep.Write(...) = %+s, want nil", err)
+				c.t.Fatalf("c.ep.Write(...) = %s, want nil", err)
 			}
 			if got, want := n, int64(len(payload)); got != want {
 				c.t.Fatalf("c.ep.Write(...) wrote %d bytes, want %d bytes", got, want)
@@ -1462,7 +1459,7 @@ func TestReadRecvOriginalDstAddr(t *testing.T) {
 			name:                    "IPv4 unicast",
 			proto:                   header.IPv4ProtocolNumber,
 			flow:                    unicastV4,
-			expectedOriginalDstAddr: tcpip.FullAddress{1, stackAddr, stackPort},
+			expectedOriginalDstAddr: tcpip.FullAddress{NIC: 1, Addr: stackAddr, Port: stackPort},
 		},
 		{
 			name:  "IPv4 multicast",
@@ -1474,7 +1471,7 @@ func TestReadRecvOriginalDstAddr(t *testing.T) {
 			// behaviour. We still include the test so that once the bug is
 			// resolved, this test will start to fail and the individual tasked
 			// with fixing this bug knows to also fix this test :).
-			expectedOriginalDstAddr: tcpip.FullAddress{1, multicastAddr, stackPort},
+			expectedOriginalDstAddr: tcpip.FullAddress{NIC: 1, Addr: multicastAddr, Port: stackPort},
 		},
 		{
 			name:  "IPv4 broadcast",
@@ -1486,13 +1483,13 @@ func TestReadRecvOriginalDstAddr(t *testing.T) {
 			// behaviour. We still include the test so that once the bug is
 			// resolved, this test will start to fail and the individual tasked
 			// with fixing this bug knows to also fix this test :).
-			expectedOriginalDstAddr: tcpip.FullAddress{1, broadcastAddr, stackPort},
+			expectedOriginalDstAddr: tcpip.FullAddress{NIC: 1, Addr: broadcastAddr, Port: stackPort},
 		},
 		{
 			name:                    "IPv6 unicast",
 			proto:                   header.IPv6ProtocolNumber,
 			flow:                    unicastV6,
-			expectedOriginalDstAddr: tcpip.FullAddress{1, stackV6Addr, stackPort},
+			expectedOriginalDstAddr: tcpip.FullAddress{NIC: 1, Addr: stackV6Addr, Port: stackPort},
 		},
 		{
 			name:  "IPv6 multicast",
@@ -1504,7 +1501,7 @@ func TestReadRecvOriginalDstAddr(t *testing.T) {
 			// behaviour. We still include the test so that once the bug is
 			// resolved, this test will start to fail and the individual tasked
 			// with fixing this bug knows to also fix this test :).
-			expectedOriginalDstAddr: tcpip.FullAddress{1, multicastV6Addr, stackPort},
+			expectedOriginalDstAddr: tcpip.FullAddress{NIC: 1, Addr: multicastV6Addr, Port: stackPort},
 		},
 	}
 
@@ -1614,6 +1611,7 @@ func TestTTL(t *testing.T) {
 				}
 				s := stack.New(stack.Options{
 					NetworkProtocols: []stack.NetworkProtocolFactory{p},
+					Clock:            &faketime.NullClock{},
 				})
 				ep := s.NetworkProtocolInstance(n).NewEndpoint(&testInterface{}, nil)
 				wantTTL = ep.DefaultTTL()
@@ -1759,7 +1757,7 @@ func TestReceiveTosTClass(t *testing.T) {
 					c.t.Errorf("got GetSockOptBool(%s) = %t, want = %t", name, v, false)
 				}
 
-				want := true
+				const want = true
 				optionSetter(want)
 
 				got := optionGetter()
@@ -1889,18 +1887,14 @@ func TestV4UnknownDestination(t *testing.T) {
 				}
 			}
 			if !tc.icmpRequired {
-				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-				defer cancel()
-				if p, ok := c.linkEP.ReadContext(ctx); ok {
+				if p, ok := c.linkEP.Read(); ok {
 					t.Fatalf("unexpected packet received: %+v", p)
 				}
 				return
 			}
 
 			// ICMP required.
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-			defer cancel()
-			p, ok := c.linkEP.ReadContext(ctx)
+			p, ok := c.linkEP.Read()
 			if !ok {
 				t.Fatalf("packet wasn't written out")
 				return
@@ -1987,18 +1981,14 @@ func TestV6UnknownDestination(t *testing.T) {
 				}
 			}
 			if !tc.icmpRequired {
-				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-				defer cancel()
-				if p, ok := c.linkEP.ReadContext(ctx); ok {
+				if p, ok := c.linkEP.Read(); ok {
 					t.Fatalf("unexpected packet received: %+v", p)
 				}
 				return
 			}
 
 			// ICMP required.
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-			defer cancel()
-			p, ok := c.linkEP.ReadContext(ctx)
+			p, ok := c.linkEP.Read()
 			if !ok {
 				t.Fatalf("packet wasn't written out")
 				return
@@ -2115,8 +2105,8 @@ func TestShortHeader(t *testing.T) {
 		Data: buf.ToVectorisedView(),
 	}))
 
-	if got, want := c.s.Stats().MalformedRcvdPackets.Value(), uint64(1); got != want {
-		t.Errorf("got c.s.Stats().MalformedRcvdPackets.Value() = %d, want = %d", got, want)
+	if got, want := c.s.Stats().NICs.MalformedL4RcvdPackets.Value(), uint64(1); got != want {
+		t.Errorf("got c.s.Stats().NIC.MalformedL4RcvdPackets.Value() = %d, want = %d", got, want)
 	}
 }
 
@@ -2124,25 +2114,27 @@ func TestShortHeader(t *testing.T) {
 // global and endpoint stats are incremented.
 func TestBadChecksumErrors(t *testing.T) {
 	for _, flow := range []testFlow{unicastV4, unicastV6} {
-		c := newDualTestContext(t, defaultMTU)
-		defer c.cleanup()
+		t.Run(flow.String(), func(t *testing.T) {
+			c := newDualTestContext(t, defaultMTU)
+			defer c.cleanup()
 
-		c.createEndpoint(flow.sockProto())
-		// Bind to wildcard.
-		if err := c.ep.Bind(tcpip.FullAddress{Port: stackPort}); err != nil {
-			c.t.Fatalf("Bind failed: %s", err)
-		}
+			c.createEndpoint(flow.sockProto())
+			// Bind to wildcard.
+			if err := c.ep.Bind(tcpip.FullAddress{Port: stackPort}); err != nil {
+				c.t.Fatalf("Bind failed: %s", err)
+			}
 
-		payload := newPayload()
-		c.injectPacket(flow, payload, true /* badChecksum */)
+			payload := newPayload()
+			c.injectPacket(flow, payload, true /* badChecksum */)
 
-		const want = 1
-		if got := c.s.Stats().UDP.ChecksumErrors.Value(); got != want {
-			t.Errorf("got stats.UDP.ChecksumErrors.Value() = %d, want = %d", got, want)
-		}
-		if got := c.ep.Stats().(*tcpip.TransportEndpointStats).ReceiveErrors.ChecksumErrors.Value(); got != want {
-			t.Errorf("got EP Stats.ReceiveErrors.ChecksumErrors stats = %d, want = %d", got, want)
-		}
+			const want = 1
+			if got := c.s.Stats().UDP.ChecksumErrors.Value(); got != want {
+				t.Errorf("got stats.UDP.ChecksumErrors.Value() = %d, want = %d", got, want)
+			}
+			if got := c.ep.Stats().(*tcpip.TransportEndpointStats).ReceiveErrors.ChecksumErrors.Value(); got != want {
+				t.Errorf("got EP Stats.ReceiveErrors.ChecksumErrors stats = %d, want = %d", got, want)
+			}
+		})
 	}
 }
 
@@ -2484,6 +2476,7 @@ func TestOutgoingSubnetBroadcast(t *testing.T) {
 			s := stack.New(stack.Options{
 				NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol, ipv6.NewProtocol},
 				TransportProtocols: []stack.TransportProtocolFactory{udp.NewProtocol},
+				Clock:              &faketime.NullClock{},
 			})
 			e := channel.New(0, defaultMTU, "")
 			if err := s.CreateNIC(nicID1, e); err != nil {

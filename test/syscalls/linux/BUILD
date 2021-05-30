@@ -1,4 +1,4 @@
-load("//tools:defs.bzl", "cc_binary", "cc_library", "default_net_util", "gtest", "select_arch", "select_system")
+load("//tools:defs.bzl", "cc_binary", "cc_library", "default_net_util", "gbenchmark", "gtest", "select_arch", "select_system")
 
 package(
     default_visibility = ["//:sandbox"],
@@ -520,13 +520,14 @@ cc_binary(
     srcs = ["concurrency.cc"],
     linkstatic = 1,
     deps = [
-        "@com_google_absl//absl/strings",
-        "@com_google_absl//absl/time",
+        gbenchmark,
         gtest,
         "//test/util:platform_util",
         "//test/util:test_main",
         "//test/util:test_util",
         "//test/util:thread_util",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/time",
     ],
 )
 
@@ -961,6 +962,22 @@ cc_binary(
 )
 
 cc_binary(
+    name = "verity_getdents_test",
+    testonly = 1,
+    srcs = ["verity_getdents.cc"],
+    linkstatic = 1,
+    deps = [
+        "//test/util:capability_util",
+        gtest,
+        "//test/util:fs_util",
+        "//test/util:temp_path",
+        "//test/util:test_main",
+        "//test/util:test_util",
+        "//test/util:verity_util",
+    ],
+)
+
+cc_binary(
     name = "getrandom_test",
     testonly = 1,
     srcs = ["getrandom.cc"],
@@ -1345,6 +1362,7 @@ cc_binary(
         "//test/util:temp_path",
         "//test/util:test_main",
         "//test/util:test_util",
+        "//test/util:verity_util",
     ],
 )
 
@@ -1489,6 +1507,7 @@ cc_binary(
         "//test/util:cleanup",
         "//test/util:posix_error",
         "//test/util:pty_util",
+        "//test/util:signal_util",
         "//test/util:test_main",
         "//test/util:test_util",
         "//test/util:thread_util",
@@ -1515,7 +1534,8 @@ cc_binary(
 cc_binary(
     name = "partial_bad_buffer_test",
     testonly = 1,
-    srcs = ["partial_bad_buffer.cc"],
+    # Android does not support preadv or pwritev in r22.
+    srcs = select_system(linux = ["partial_bad_buffer.cc"]),
     linkstatic = 1,
     deps = [
         ":socket_test_util",
@@ -1574,6 +1594,7 @@ cc_binary(
         "@com_google_absl//absl/time",
         gtest,
         "//test/util:posix_error",
+        "//test/util:signal_util",
         "//test/util:temp_path",
         "//test/util:test_main",
         "//test/util:test_util",
@@ -3671,7 +3692,8 @@ cc_binary(
 cc_binary(
     name = "sync_test",
     testonly = 1,
-    srcs = ["sync.cc"],
+    # Android does not support syncfs in r22.
+    srcs = select_system(linux = ["sync.cc"]),
     linkstatic = 1,
     deps = [
         gtest,
@@ -3784,10 +3806,9 @@ cc_binary(
     srcs = ["timers.cc"],
     linkstatic = 1,
     deps = [
-        "//test/util:cleanup",
-        "@com_google_absl//absl/flags:flag",
-        "@com_google_absl//absl/time",
+        gbenchmark,
         gtest,
+        "//test/util:cleanup",
         "//test/util:logging",
         "//test/util:multiprocess_util",
         "//test/util:posix_error",
@@ -3795,6 +3816,8 @@ cc_binary(
         "//test/util:test_util",
         "//test/util:thread_util",
         "//test/util:timer_util",
+        "@com_google_absl//absl/flags:flag",
+        "@com_google_absl//absl/time",
     ],
 )
 
@@ -3966,7 +3989,8 @@ cc_binary(
 cc_binary(
     name = "utimes_test",
     testonly = 1,
-    srcs = ["utimes.cc"],
+    # Android does not support futimesat in r22.
+    srcs = select_system(linux = ["utimes.cc"]),
     linkstatic = 1,
     deps = [
         "//test/util:file_descriptor",
@@ -4082,7 +4106,8 @@ cc_binary(
 cc_binary(
     name = "semaphore_test",
     testonly = 1,
-    srcs = ["semaphore.cc"],
+    # Android does not support XSI semaphores in r22.
+    srcs = select_system(linux = ["semaphore.cc"]),
     linkstatic = 1,
     deps = [
         "//test/util:capability_util",

@@ -1,4 +1,4 @@
-// Copyright 2018 The gVisor Authors.
+// Copyright 2021 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,4 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Empty assembly file so empty func definitions work.
+package kvm
+
+import (
+	"gvisor.dev/gvisor/pkg/ring0"
+)
+
+// invalidate is the implementation for Invalidate.
+func (as *addressSpace) invalidate() {
+	bluepill(as.pageTables.Allocator.(*allocator).cpu)
+	ring0.FlushTlbAll()
+}

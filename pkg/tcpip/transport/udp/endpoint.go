@@ -17,6 +17,7 @@ package udp
 import (
 	"io"
 	"sync/atomic"
+	"time"
 
 	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/tcpip"
@@ -34,25 +35,26 @@ type udpPacket struct {
 	destinationAddress tcpip.FullAddress
 	packetInfo         tcpip.IPPacketInfo
 	data               buffer.VectorisedView `state:".(buffer.VectorisedView)"`
-	timestamp          int64
+	receivedAt         time.Time             `state:".(int64)"`
 	// tos stores either the receiveTOS or receiveTClass value.
 	tos uint8
 }
 
 // EndpointState represents the state of a UDP endpoint.
-type EndpointState uint32
+type EndpointState tcpip.EndpointState
 
 // Endpoint states. Note that are represented in a netstack-specific manner and
 // may not be meaningful externally. Specifically, they need to be translated to
 // Linux's representation for these states if presented to userspace.
 const (
-	StateInitial EndpointState = iota
+	_ EndpointState = iota
+	StateInitial
 	StateBound
 	StateConnected
 	StateClosed
 )
 
-// String implements fmt.Stringer.String.
+// String implements fmt.Stringer.
 func (s EndpointState) String() string {
 	switch s {
 	case StateInitial:
@@ -98,7 +100,7 @@ type endpoint struct {
 	mu sync.RWMutex `state:"nosave"`
 	// state must be read/set using the EndpointState()/setEndpointState()
 	// methods.
-	state          EndpointState
+	state          uint32
 	route          *stack.Route `state:"manual"`
 	dstPort        uint16
 	ttl            uint8
@@ -176,7 +178,7 @@ func newEndpoint(s *stack.Stack, netProto tcpip.NetworkProtocolNumber, waiterQue
 		// Linux defaults to TTL=1.
 		multicastTTL:         1,
 		multicastMemberships: make(map[multicastMembership]struct{}),
-		state:                StateInitial,
+		state:                uint32(StateInitial),
 		uniqueID:             s.UniqueID(),
 	}
 	e.ops.InitHandler(e, e.stack, tcpip.GetStackSendBufferLimits, tcpip.GetStackReceiveBufferLimits)
@@ -204,15 +206,15 @@ func newEndpoint(s *stack.Stack, netProto tcpip.NetworkProtocolNumber, waiterQue
 //
 // Precondition: e.mu must be held to call this method.
 func (e *endpoint) setEndpointState(state EndpointState) {
-	atomic.StoreUint32((*uint32)(&e.state), uint32(state))
+	atomic.StoreUint32(&e.state, uint32(state))
 }
 
 // EndpointState() returns the current state of the endpoint.
 func (e *endpoint) EndpointState() EndpointState {
-	return EndpointState(atomic.LoadUint32((*uint32)(&e.state)))
+	return EndpointState(atomic.LoadUint32(&e.state))
 }
 
-// UniqueID implements stack.TransportEndpoint.UniqueID.
+// UniqueID implements stack.TransportEndpoint.
 func (e *endpoint) UniqueID() uint64 {
 	return e.uniqueID
 }
@@ -226,14 +228,14 @@ func (e *endpoint) LastError() tcpip.Error {
 	return err
 }
 
-// UpdateLastError implements tcpip.SocketOptionsHandler.UpdateLastError.
+// UpdateLastError implements tcpip.SocketOptionsHandler.
 func (e *endpoint) UpdateLastError(err tcpip.Error) {
 	e.lastErrorMu.Lock()
 	e.lastError = err
 	e.lastErrorMu.Unlock()
 }
 
-// Abort implements stack.TransportEndpoint.Abort.
+// Abort implements stack.TransportEndpoint.
 func (e *endpoint) Abort() {
 	e.Close()
 }
@@ -289,10 +291,10 @@ func (e *endpoint) Close() {
 	e.waiterQueue.Notify(waiter.EventHUp | waiter.EventErr | waiter.ReadableEvents | waiter.WritableEvents)
 }
 
-// ModerateRecvBuf implements tcpip.Endpoint.ModerateRecvBuf.
-func (e *endpoint) ModerateRecvBuf(copied int) {}
+// ModerateRecvBuf implements tcpip.Endpoint.
+func (*endpoint) ModerateRecvBuf(int) {}
 
-// Read implements tcpip.Endpoint.Read.
+// Read implements tcpip.Endpoint.
 func (e *endpoint) Read(dst io.Writer, opts tcpip.ReadOptions) (tcpip.ReadResult, tcpip.Error) {
 	if err := e.LastError(); err != nil {
 		return tcpip.ReadResult{}, err
@@ -320,7 +322,7 @@ func (e *endpoint) Read(dst io.Writer, opts tcpip.ReadOptions) (tcpip.ReadResult
 	// Control Messages
 	cm := tcpip.ControlMessages{
 		HasTimestamp: true,
-		Timestamp:    p.timestamp,
+		Timestamp:    p.receivedAt.UnixNano(),
 	}
 	if e.ops.GetReceiveTOS() {
 		cm.HasTOS = true
@@ -581,21 +583,21 @@ func (e *endpoint) write(p tcpip.Payloader, opts tcpip.WriteOptions) (int64, tcp
 	return int64(len(v)), nil
 }
 
-// OnReuseAddressSet implements tcpip.SocketOptionsHandler.OnReuseAddressSet.
+// OnReuseAddressSet implements tcpip.SocketOptionsHandler.
 func (e *endpoint) OnReuseAddressSet(v bool) {
 	e.mu.Lock()
 	e.portFlags.MostRecent = v
 	e.mu.Unlock()
 }
 
-// OnReusePortSet implements tcpip.SocketOptionsHandler.OnReusePortSet.
+// OnReusePortSet implements tcpip.SocketOptionsHandler.
 func (e *endpoint) OnReusePortSet(v bool) {
 	e.mu.Lock()
 	e.portFlags.LoadBalanced = v
 	e.mu.Unlock()
 }
 
-// SetSockOptInt implements tcpip.Endpoint.SetSockOptInt.
+// SetSockOptInt implements tcpip.Endpoint.
 func (e *endpoint) SetSockOptInt(opt tcpip.SockOptInt, v int) tcpip.Error {
 	switch opt {
 	case tcpip.MTUDiscoverOption:
@@ -629,11 +631,14 @@ func (e *endpoint) SetSockOptInt(opt tcpip.SockOptInt, v int) tcpip.Error {
 	return nil
 }
 
+var _ tcpip.SocketOptionsHandler = (*endpoint)(nil)
+
+// HasNIC implements tcpip.SocketOptionsHandler.
 func (e *endpoint) HasNIC(id int32) bool {
-	return id == 0 || e.stack.HasNIC(tcpip.NICID(id))
+	return e.stack.HasNIC(tcpip.NICID(id))
 }
 
-// SetSockOpt implements tcpip.Endpoint.SetSockOpt.
+// SetSockOpt implements tcpip.Endpoint.
 func (e *endpoint) SetSockOpt(opt tcpip.SettableSocketOption) tcpip.Error {
 	switch v := opt.(type) {
 	case *tcpip.MulticastInterfaceOption:
@@ -749,7 +754,7 @@ func (e *endpoint) SetSockOpt(opt tcpip.SettableSocketOption) tcpip.Error {
 	return nil
 }
 
-// GetSockOptInt implements tcpip.Endpoint.GetSockOptInt.
+// GetSockOptInt implements tcpip.Endpoint.
 func (e *endpoint) GetSockOptInt(opt tcpip.SockOptInt) (int, tcpip.Error) {
 	switch opt {
 	case tcpip.IPv4TOSOption:
@@ -795,14 +800,14 @@ func (e *endpoint) GetSockOptInt(opt tcpip.SockOptInt) (int, tcpip.Error) {
 	}
 }
 
-// GetSockOpt implements tcpip.Endpoint.GetSockOpt.
+// GetSockOpt implements tcpip.Endpoint.
 func (e *endpoint) GetSockOpt(opt tcpip.GettableSocketOption) tcpip.Error {
 	switch o := opt.(type) {
 	case *tcpip.MulticastInterfaceOption:
 		e.mu.Lock()
 		*o = tcpip.MulticastInterfaceOption{
-			e.multicastNICID,
-			e.multicastAddr,
+			NIC:           e.multicastNICID,
+			InterfaceAddr: e.multicastAddr,
 		}
 		e.mu.Unlock()
 
@@ -872,7 +877,7 @@ func (e *endpoint) checkV4MappedLocked(addr tcpip.FullAddress) (tcpip.FullAddres
 	return unwrapped, netProto, nil
 }
 
-// Disconnect implements tcpip.Endpoint.Disconnect.
+// Disconnect implements tcpip.Endpoint.
 func (e *endpoint) Disconnect() tcpip.Error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -1075,7 +1080,7 @@ func (e *endpoint) registerWithStack(netProtos []tcpip.NetworkProtocolNumber, id
 			BindToDevice: bindToDevice,
 			Dest:         tcpip.FullAddress{},
 		}
-		port, err := e.stack.ReservePort(portRes, nil /* testPort */)
+		port, err := e.stack.ReservePort(e.stack.Rand(), portRes, nil /* testPort */)
 		if err != nil {
 			return id, bindToDevice, err
 		}
@@ -1301,12 +1306,12 @@ func (e *endpoint) HandlePacket(id stack.TransportEndpointID, pkt *stack.PacketB
 		senderAddress: tcpip.FullAddress{
 			NIC:  pkt.NICID,
 			Addr: id.RemoteAddress,
-			Port: header.UDP(hdr).SourcePort(),
+			Port: hdr.SourcePort(),
 		},
 		destinationAddress: tcpip.FullAddress{
 			NIC:  pkt.NICID,
 			Addr: id.LocalAddress,
-			Port: header.UDP(hdr).DestinationPort(),
+			Port: hdr.DestinationPort(),
 		},
 		data: pkt.Data().ExtractVV(),
 	}
@@ -1328,7 +1333,7 @@ func (e *endpoint) HandlePacket(id stack.TransportEndpointID, pkt *stack.PacketB
 	packet.packetInfo.LocalAddr = localAddr
 	packet.packetInfo.DestinationAddr = localAddr
 	packet.packetInfo.NIC = pkt.NICID
-	packet.timestamp = e.stack.Clock().NowNanoseconds()
+	packet.receivedAt = e.stack.Clock().Now()
 
 	e.rcvMu.Unlock()
 
@@ -1386,7 +1391,7 @@ func (e *endpoint) HandleError(transErr stack.TransportError, pkt *stack.PacketB
 	}
 }
 
-// State implements tcpip.Endpoint.State.
+// State implements tcpip.Endpoint.
 func (e *endpoint) State() uint32 {
 	return uint32(e.EndpointState())
 }
@@ -1405,19 +1410,19 @@ func (e *endpoint) Stats() tcpip.EndpointStats {
 	return &e.stats
 }
 
-// Wait implements tcpip.Endpoint.Wait.
+// Wait implements tcpip.Endpoint.
 func (*endpoint) Wait() {}
 
 func (e *endpoint) isBroadcastOrMulticast(nicID tcpip.NICID, netProto tcpip.NetworkProtocolNumber, addr tcpip.Address) bool {
 	return addr == header.IPv4Broadcast || header.IsV4MulticastAddress(addr) || header.IsV6MulticastAddress(addr) || e.stack.IsSubnetBroadcast(nicID, netProto, addr)
 }
 
-// SetOwner implements tcpip.Endpoint.SetOwner.
+// SetOwner implements tcpip.Endpoint.
 func (e *endpoint) SetOwner(owner tcpip.PacketOwner) {
 	e.owner = owner
 }
 
-// SocketOptions implements tcpip.Endpoint.SocketOptions.
+// SocketOptions implements tcpip.Endpoint.
 func (e *endpoint) SocketOptions() *tcpip.SocketOptions {
 	return &e.ops
 }

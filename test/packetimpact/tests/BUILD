@@ -104,8 +104,6 @@ packetimpact_testbench(
     srcs = ["tcp_retransmits_test.go"],
     deps = [
         "//pkg/abi/linux",
-        "//pkg/binary",
-        "//pkg/hostarch",
         "//pkg/tcpip/header",
         "//test/packetimpact/testbench",
         "@org_golang_x_sys//unix:go_default_library",
@@ -189,6 +187,7 @@ packetimpact_testbench(
     name = "tcp_synsent_reset",
     srcs = ["tcp_synsent_reset_test.go"],
     deps = [
+        "//pkg/abi/linux",
         "//pkg/tcpip/header",
         "//test/packetimpact/testbench",
         "@org_golang_x_sys//unix:go_default_library",
@@ -307,18 +306,6 @@ packetimpact_testbench(
 )
 
 packetimpact_testbench(
-    name = "udp_send_recv_dgram",
-    srcs = ["udp_send_recv_dgram_test.go"],
-    deps = [
-        "//pkg/tcpip",
-        "//pkg/tcpip/header",
-        "//test/packetimpact/testbench",
-        "@com_github_google_go_cmp//cmp:go_default_library",
-        "@org_golang_x_sys//unix:go_default_library",
-    ],
-)
-
-packetimpact_testbench(
     name = "tcp_linger",
     srcs = ["tcp_linger_test.go"],
     deps = [
@@ -353,8 +340,6 @@ packetimpact_testbench(
     srcs = ["tcp_rack_test.go"],
     deps = [
         "//pkg/abi/linux",
-        "//pkg/binary",
-        "//pkg/hostarch",
         "//pkg/tcpip/header",
         "//pkg/tcpip/seqnum",
         "//test/packetimpact/testbench",
@@ -367,8 +352,6 @@ packetimpact_testbench(
     srcs = ["tcp_info_test.go"],
     deps = [
         "//pkg/abi/linux",
-        "//pkg/binary",
-        "//pkg/hostarch",
         "//pkg/tcpip/header",
         "//test/packetimpact/testbench",
         "@org_golang_x_sys//unix:go_default_library",
@@ -415,10 +398,23 @@ packetimpact_testbench(
     ],
 )
 
+packetimpact_testbench(
+    name = "generic_dgram_socket_send_recv",
+    srcs = ["generic_dgram_socket_send_recv_test.go"],
+    deps = [
+        "//pkg/tcpip",
+        "//pkg/tcpip/header",
+        "//test/packetimpact/testbench",
+        "@com_github_google_go_cmp//cmp:go_default_library",
+        "@org_golang_x_sys//unix:go_default_library",
+    ],
+)
+
 validate_all_tests()
 
 [packetimpact_go_test(
     name = t.name,
+    timeout = t.timeout if hasattr(t, "timeout") else "moderate",
     expect_netstack_failure = hasattr(t, "expect_netstack_failure"),
     num_duts = t.num_duts if hasattr(t, "num_duts") else 1,
 ) for t in ALL_TESTS]

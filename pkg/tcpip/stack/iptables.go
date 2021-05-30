@@ -42,7 +42,7 @@ const reaperDelay = 5 * time.Second
 
 // DefaultTables returns a default set of tables. Each chain is set to accept
 // all packets.
-func DefaultTables() *IPTables {
+func DefaultTables(seed uint32) *IPTables {
 	return &IPTables{
 		v4Tables: [NumTables]Table{
 			NATID: {
@@ -182,7 +182,7 @@ func DefaultTables() *IPTables {
 			Postrouting: {MangleID, NATID},
 		},
 		connections: ConnTrack{
-			seed: generateRandUint32(),
+			seed: seed,
 		},
 		reaperDone: make(chan struct{}, 1),
 	}
@@ -371,6 +371,7 @@ func (it *IPTables) startReaper(interval time.Duration) {
 			select {
 			case <-it.reaperDone:
 				return
+				// TODO(gvisor.dev/issue/5939): do not use the ambient clock.
 			case <-time.After(interval):
 				bucket, interval = it.connections.reapUnused(bucket, interval)
 			}
