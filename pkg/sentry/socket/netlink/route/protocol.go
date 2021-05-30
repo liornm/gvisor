@@ -500,29 +500,16 @@ func (p *Protocol) delAddr(ctx context.Context, msg *netlink.Message, ms *netlin
 	return nil
 }
 
-// newRoute handles RTM_NEWROUTE requests.
-func (p *Protocol) newRoute(ctx context.Context, msg *netlink.Message, ms *netlink.MessageSet) *syserr.Error {
-	stack := inet.StackFromContext(ctx)
-	if stack == nil {
-		// No network routes.
-		return nil
-	}
-	hdr := msg.Header()
-
-	flags := hdr.Flags&^(linux.NLM_F_REQUEST|linux.NLM_F_ACK)
-	if flags != linux.NLM_F_CREATE|linux.NLM_F_EXCL {
-		// ip route prepend/append/change/replace/test are not implemented.
-		return syserr.ErrInvalidArgument
-	}
+func fetchRoute(msg *netlink.Message) (*inet.Route, *syserr.Error) {
 	var rtMsg linux.RouteMessage
 	attrs, ok := msg.GetData(&rtMsg)
 	if !ok {
-		return syserr.ErrInvalidArgument
+		return nil, syserr.ErrInvalidArgument
 	}
 	if rtMsg.Table != linux.RT_TABLE_MAIN {
 		// Only the main table since we don't have multiple
 		// routing tables.
-		return syserr.ErrInvalidArgument
+		return nil, syserr.ErrInvalidArgument
 	}
 	route := inet.Route{
 		Family:   rtMsg.Family,
@@ -552,11 +539,31 @@ func (p *Protocol) newRoute(ctx context.Context, msg *netlink.Message, ms *netli
 			route.OutputInterface = int32(outputIF)
 		default:
 			// Other attributes are not implemented yet.
-			return syserr.ErrInvalidArgument
+			return nil, syserr.ErrInvalidArgument
 		}
 		attHdr, buff, rest, ok = rest.ParseFirst()
 	}
-	err := stack.AddRoute(route)
+	return &route, nil
+}
+
+// newRoute handles RTM_NEWROUTE requests.
+func (p *Protocol) newRoute(ctx context.Context, msg *netlink.Message, ms *netlink.MessageSet) *syserr.Error {
+	stack := inet.StackFromContext(ctx)
+	if stack == nil {
+		// No network routes.
+		return nil
+	}
+	hdr := msg.Header()
+	flags := hdr.Flags&^(linux.NLM_F_REQUEST|linux.NLM_F_ACK)
+	if flags != linux.NLM_F_CREATE|linux.NLM_F_EXCL {
+		// ip route prepend/append/change/replace/test are not implemented.
+		return syserr.ErrInvalidArgument
+	}
+	route, error := fetchRoute(msg)
+	if error != nil {
+		return error
+	}
+	err := stack.AddRoute(*route)
 	if err != nil {
 		if err.Error() == syserr.ErrExists.String() {
 			return syserr.ErrExists
@@ -609,7 +616,6 @@ func (p *Protocol) ProcessMessage(ctx context.Context, msg *netlink.Message, ms 
 			return p.newAddr(ctx, msg, ms)
 		case linux.RTM_DELADDR:
 			return p.delAddr(ctx, msg, ms)
-
 		case linux.RTM_NEWROUTE:
 			return p.newRoute(ctx, msg, ms)
 		default:

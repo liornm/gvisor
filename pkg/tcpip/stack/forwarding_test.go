@@ -23,6 +23,7 @@ import (
 	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/buffer"
+	"gvisor.dev/gvisor/pkg/tcpip/faketime"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 )
 
@@ -114,10 +115,6 @@ func (f *fwdTestNetworkEndpoint) MaxHeaderLength() uint16 {
 	return f.nic.MaxHeaderLength() + fwdTestNetHeaderLen
 }
 
-func (*fwdTestNetworkEndpoint) PseudoHeaderChecksum(protocol tcpip.TransportProtocolNumber, dstAddr tcpip.Address) uint16 {
-	return 0
-}
-
 func (f *fwdTestNetworkEndpoint) NetworkProtocolNumber() tcpip.NetworkProtocolNumber {
 	return f.proto.Number()
 }
@@ -134,7 +131,7 @@ func (f *fwdTestNetworkEndpoint) WritePacket(r *Route, params NetworkHeaderParam
 }
 
 // WritePackets implements LinkEndpoint.WritePackets.
-func (*fwdTestNetworkEndpoint) WritePackets(r *Route, pkts PacketBufferList, params NetworkHeaderParams) (int, tcpip.Error) {
+func (*fwdTestNetworkEndpoint) WritePackets(*Route, PacketBufferList, NetworkHeaderParams) (int, tcpip.Error) {
 	panic("not implemented")
 }
 
@@ -224,7 +221,7 @@ func (*fwdTestNetworkProtocol) Wait() {}
 
 func (f *fwdTestNetworkEndpoint) LinkAddressRequest(addr, _ tcpip.Address, remoteLinkAddr tcpip.LinkAddress) tcpip.Error {
 	if fn := f.proto.onLinkAddressResolved; fn != nil {
-		time.AfterFunc(f.proto.addrResolveDelay, func() {
+		f.proto.stack.clock.AfterFunc(f.proto.addrResolveDelay, func() {
 			fn(f.proto.neigh, addr, remoteLinkAddr)
 		})
 	}
@@ -319,7 +316,7 @@ func (e *fwdTestLinkEndpoint) LinkAddress() tcpip.LinkAddress {
 	return e.linkAddr
 }
 
-func (e fwdTestLinkEndpoint) WritePacket(r RouteInfo, protocol tcpip.NetworkProtocolNumber, pkt *PacketBuffer) tcpip.Error {
+func (e fwdTestLinkEndpoint) WritePacket(r RouteInfo, _ tcpip.NetworkProtocolNumber, pkt *PacketBuffer) tcpip.Error {
 	p := fwdTestPacketInfo{
 		RemoteLinkAddress: r.RemoteLinkAddress,
 		LocalLinkAddress:  r.LocalLinkAddress,
@@ -354,17 +351,19 @@ func (*fwdTestLinkEndpoint) ARPHardwareType() header.ARPHardwareType {
 }
 
 // AddHeader implements stack.LinkEndpoint.AddHeader.
-func (e *fwdTestLinkEndpoint) AddHeader(local, remote tcpip.LinkAddress, protocol tcpip.NetworkProtocolNumber, pkt *PacketBuffer) {
+func (e *fwdTestLinkEndpoint) AddHeader(tcpip.LinkAddress, tcpip.LinkAddress, tcpip.NetworkProtocolNumber, *PacketBuffer) {
 	panic("not implemented")
 }
 
-func fwdTestNetFactory(t *testing.T, proto *fwdTestNetworkProtocol) (ep1, ep2 *fwdTestLinkEndpoint) {
+func fwdTestNetFactory(t *testing.T, proto *fwdTestNetworkProtocol) (*faketime.ManualClock, *fwdTestLinkEndpoint, *fwdTestLinkEndpoint) {
+	clock := faketime.NewManualClock()
 	// Create a stack with the network protocol and two NICs.
 	s := New(Options{
 		NetworkProtocols: []NetworkProtocolFactory{func(s *Stack) NetworkProtocol {
 			proto.stack = s
 			return proto
 		}},
+		Clock: clock,
 	})
 
 	protoNum := proto.Number()
@@ -373,7 +372,7 @@ func fwdTestNetFactory(t *testing.T, proto *fwdTestNetworkProtocol) (ep1, ep2 *f
 	}
 
 	// NIC 1 has the link address "a", and added the network address 1.
-	ep1 = &fwdTestLinkEndpoint{
+	ep1 := &fwdTestLinkEndpoint{
 		C:        make(chan fwdTestPacketInfo, 300),
 		mtu:      fwdTestNetDefaultMTU,
 		linkAddr: "a",
@@ -386,7 +385,7 @@ func fwdTestNetFactory(t *testing.T, proto *fwdTestNetworkProtocol) (ep1, ep2 *f
 	}
 
 	// NIC 2 has the link address "b", and added the network address 2.
-	ep2 = &fwdTestLinkEndpoint{
+	ep2 := &fwdTestLinkEndpoint{
 		C:        make(chan fwdTestPacketInfo, 300),
 		mtu:      fwdTestNetDefaultMTU,
 		linkAddr: "b",
@@ -416,7 +415,7 @@ func fwdTestNetFactory(t *testing.T, proto *fwdTestNetworkProtocol) (ep1, ep2 *f
 		s.SetRouteTable([]tcpip.Route{{Destination: subnet, NIC: 2}})
 	}
 
-	return ep1, ep2
+	return clock, ep1, ep2
 }
 
 func TestForwardingWithStaticResolver(t *testing.T) {
@@ -432,7 +431,7 @@ func TestForwardingWithStaticResolver(t *testing.T) {
 		},
 	}
 
-	ep1, ep2 := fwdTestNetFactory(t, proto)
+	clock, ep1, ep2 := fwdTestNetFactory(t, proto)
 
 	// Inject an inbound packet to address 3 on NIC 1, and see if it is
 	// forwarded to NIC 2.
@@ -444,6 +443,7 @@ func TestForwardingWithStaticResolver(t *testing.T) {
 
 	var p fwdTestPacketInfo
 
+	clock.Advance(proto.addrResolveDelay)
 	select {
 	case p = <-ep2.C:
 	default:
@@ -475,7 +475,7 @@ func TestForwardingWithFakeResolver(t *testing.T) {
 			})
 		},
 	}
-	ep1, ep2 := fwdTestNetFactory(t, &proto)
+	clock, ep1, ep2 := fwdTestNetFactory(t, &proto)
 
 	// Inject an inbound packet to address 3 on NIC 1, and see if it is
 	// forwarded to NIC 2.
@@ -487,9 +487,10 @@ func TestForwardingWithFakeResolver(t *testing.T) {
 
 	var p fwdTestPacketInfo
 
+	clock.Advance(proto.addrResolveDelay)
 	select {
 	case p = <-ep2.C:
-	case <-time.After(time.Second):
+	default:
 		t.Fatal("packet not forwarded")
 	}
 
@@ -508,7 +509,7 @@ func TestForwardingWithNoResolver(t *testing.T) {
 
 	// Whether or not we use the neighbor cache here does not matter since
 	// neither linkAddrCache nor neighborCache will be used.
-	ep1, ep2 := fwdTestNetFactory(t, proto)
+	clock, ep1, ep2 := fwdTestNetFactory(t, proto)
 
 	// inject an inbound packet to address 3 on NIC 1, and see if it is
 	// forwarded to NIC 2.
@@ -518,10 +519,11 @@ func TestForwardingWithNoResolver(t *testing.T) {
 		Data: buf.ToVectorisedView(),
 	}))
 
+	clock.Advance(proto.addrResolveDelay)
 	select {
 	case <-ep2.C:
 		t.Fatal("Packet should not be forwarded")
-	case <-time.After(time.Second):
+	default:
 	}
 }
 
@@ -533,7 +535,7 @@ func TestForwardingResolutionFailsForQueuedPackets(t *testing.T) {
 		},
 	}
 
-	ep1, ep2 := fwdTestNetFactory(t, proto)
+	clock, ep1, ep2 := fwdTestNetFactory(t, proto)
 
 	const numPackets int = 5
 	// These packets will all be enqueued in the packet queue to wait for link
@@ -547,12 +549,12 @@ func TestForwardingResolutionFailsForQueuedPackets(t *testing.T) {
 	}
 
 	// All packets should fail resolution.
-	// TODO(gvisor.dev/issue/5141): Use a fake clock.
 	for i := 0; i < numPackets; i++ {
+		clock.Advance(proto.addrResolveDelay)
 		select {
 		case got := <-ep2.C:
 			t.Fatalf("got %#v; packets should have failed resolution and not been forwarded", got)
-		case <-time.After(100 * time.Millisecond):
+		default:
 		}
 	}
 }
@@ -576,7 +578,7 @@ func TestForwardingWithFakeResolverPartialTimeout(t *testing.T) {
 			}
 		},
 	}
-	ep1, ep2 := fwdTestNetFactory(t, &proto)
+	clock, ep1, ep2 := fwdTestNetFactory(t, &proto)
 
 	// Inject an inbound packet to address 4 on NIC 1. This packet should
 	// not be forwarded.
@@ -596,9 +598,10 @@ func TestForwardingWithFakeResolverPartialTimeout(t *testing.T) {
 
 	var p fwdTestPacketInfo
 
+	clock.Advance(proto.addrResolveDelay)
 	select {
 	case p = <-ep2.C:
-	case <-time.After(time.Second):
+	default:
 		t.Fatal("packet not forwarded")
 	}
 
@@ -631,7 +634,7 @@ func TestForwardingWithFakeResolverTwoPackets(t *testing.T) {
 			})
 		},
 	}
-	ep1, ep2 := fwdTestNetFactory(t, &proto)
+	clock, ep1, ep2 := fwdTestNetFactory(t, &proto)
 
 	// Inject two inbound packets to address 3 on NIC 1.
 	for i := 0; i < 2; i++ {
@@ -645,9 +648,10 @@ func TestForwardingWithFakeResolverTwoPackets(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		var p fwdTestPacketInfo
 
+		clock.Advance(proto.addrResolveDelay)
 		select {
 		case p = <-ep2.C:
-		case <-time.After(time.Second):
+		default:
 			t.Fatal("packet not forwarded")
 		}
 
@@ -681,7 +685,7 @@ func TestForwardingWithFakeResolverManyPackets(t *testing.T) {
 			})
 		},
 	}
-	ep1, ep2 := fwdTestNetFactory(t, &proto)
+	clock, ep1, ep2 := fwdTestNetFactory(t, &proto)
 
 	for i := 0; i < maxPendingPacketsPerResolution+5; i++ {
 		// Inject inbound 'maxPendingPacketsPerResolution + 5' packets on NIC 1.
@@ -697,9 +701,10 @@ func TestForwardingWithFakeResolverManyPackets(t *testing.T) {
 	for i := 0; i < maxPendingPacketsPerResolution; i++ {
 		var p fwdTestPacketInfo
 
+		clock.Advance(proto.addrResolveDelay)
 		select {
 		case p = <-ep2.C:
-		case <-time.After(time.Second):
+		default:
 			t.Fatal("packet not forwarded")
 		}
 
@@ -745,7 +750,7 @@ func TestForwardingWithFakeResolverManyResolutions(t *testing.T) {
 			})
 		},
 	}
-	ep1, ep2 := fwdTestNetFactory(t, &proto)
+	clock, ep1, ep2 := fwdTestNetFactory(t, &proto)
 
 	for i := 0; i < maxPendingResolutions+5; i++ {
 		// Inject inbound 'maxPendingResolutions + 5' packets on NIC 1.
@@ -761,9 +766,10 @@ func TestForwardingWithFakeResolverManyResolutions(t *testing.T) {
 	for i := 0; i < maxPendingResolutions; i++ {
 		var p fwdTestPacketInfo
 
+		clock.Advance(proto.addrResolveDelay)
 		select {
 		case p = <-ep2.C:
-		case <-time.After(time.Second):
+		default:
 			t.Fatal("packet not forwarded")
 		}
 

@@ -27,6 +27,7 @@ package raw
 
 import (
 	"io"
+	"time"
 
 	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/tcpip"
@@ -41,9 +42,8 @@ type rawPacket struct {
 	rawPacketEntry
 	// data holds the actual packet data, including any headers and
 	// payload.
-	data buffer.VectorisedView `state:".(buffer.VectorisedView)"`
-	// timestampNS is the unix time at which the packet was received.
-	timestampNS int64
+	data       buffer.VectorisedView `state:".(buffer.VectorisedView)"`
+	receivedAt time.Time             `state:".(int64)"`
 	// senderAddr is the network address of the sender.
 	senderAddr tcpip.FullAddress
 }
@@ -183,7 +183,7 @@ func (e *endpoint) Close() {
 }
 
 // ModerateRecvBuf implements tcpip.Endpoint.ModerateRecvBuf.
-func (e *endpoint) ModerateRecvBuf(copied int) {}
+func (*endpoint) ModerateRecvBuf(int) {}
 
 func (e *endpoint) SetOwner(owner tcpip.PacketOwner) {
 	e.mu.Lock()
@@ -219,7 +219,7 @@ func (e *endpoint) Read(dst io.Writer, opts tcpip.ReadOptions) (tcpip.ReadResult
 		Total: pkt.data.Size(),
 		ControlMessages: tcpip.ControlMessages{
 			HasTimestamp: true,
-			Timestamp:    pkt.timestampNS,
+			Timestamp:    pkt.receivedAt.UnixNano(),
 		},
 	}
 	if opts.NeedRemoteAddr {
@@ -402,7 +402,7 @@ func (e *endpoint) Connect(addr tcpip.FullAddress) tcpip.Error {
 	}
 
 	// Find a route to the destination.
-	route, err := e.stack.FindRoute(nic, tcpip.Address(""), addr.Addr, e.NetProto, false)
+	route, err := e.stack.FindRoute(nic, "", addr.Addr, e.NetProto, false)
 	if err != nil {
 		return err
 	}
@@ -428,7 +428,7 @@ func (e *endpoint) Connect(addr tcpip.FullAddress) tcpip.Error {
 }
 
 // Shutdown implements tcpip.Endpoint.Shutdown. It's a noop for raw sockets.
-func (e *endpoint) Shutdown(flags tcpip.ShutdownFlags) tcpip.Error {
+func (e *endpoint) Shutdown(tcpip.ShutdownFlags) tcpip.Error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -439,7 +439,7 @@ func (e *endpoint) Shutdown(flags tcpip.ShutdownFlags) tcpip.Error {
 }
 
 // Listen implements tcpip.Endpoint.Listen.
-func (*endpoint) Listen(backlog int) tcpip.Error {
+func (*endpoint) Listen(int) tcpip.Error {
 	return &tcpip.ErrNotSupported{}
 }
 
@@ -513,12 +513,12 @@ func (e *endpoint) SetSockOpt(opt tcpip.SettableSocketOption) tcpip.Error {
 	}
 }
 
-func (e *endpoint) SetSockOptInt(opt tcpip.SockOptInt, v int) tcpip.Error {
+func (*endpoint) SetSockOptInt(tcpip.SockOptInt, int) tcpip.Error {
 	return &tcpip.ErrUnknownProtocolOption{}
 }
 
 // GetSockOpt implements tcpip.Endpoint.GetSockOpt.
-func (e *endpoint) GetSockOpt(opt tcpip.GettableSocketOption) tcpip.Error {
+func (*endpoint) GetSockOpt(tcpip.GettableSocketOption) tcpip.Error {
 	return &tcpip.ErrUnknownProtocolOption{}
 }
 
@@ -621,7 +621,7 @@ func (e *endpoint) HandlePacket(pkt *stack.PacketBuffer) {
 	}
 	combinedVV.Append(pkt.Data().ExtractVV())
 	packet.data = combinedVV
-	packet.timestampNS = e.stack.Clock().NowNanoseconds()
+	packet.receivedAt = e.stack.Clock().Now()
 
 	e.rcvList.PushBack(packet)
 	e.rcvBufSize += packet.data.Size()

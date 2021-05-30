@@ -50,7 +50,7 @@ func IPv4(t *testing.T, b []byte, checkers ...NetworkChecker) {
 	ipv4 := header.IPv4(b)
 
 	if !ipv4.IsValid(len(b)) {
-		t.Error("Not a valid IPv4 packet")
+		t.Fatalf("Not a valid IPv4 packet: %x", ipv4)
 	}
 
 	if !ipv4.IsChecksumValid() {
@@ -72,7 +72,7 @@ func IPv6(t *testing.T, b []byte, checkers ...NetworkChecker) {
 
 	ipv6 := header.IPv6(b)
 	if !ipv6.IsValid(len(b)) {
-		t.Error("Not a valid IPv6 packet")
+		t.Fatalf("Not a valid IPv6 packet: %x", ipv6)
 	}
 
 	for _, f := range checkers {
@@ -701,7 +701,7 @@ func TCPTimestampChecker(wantTS bool, wantTSVal uint32, wantTSEcr uint32) Transp
 		if !ok {
 			return
 		}
-		opts := []byte(tcp.Options())
+		opts := tcp.Options()
 		limit := len(opts)
 		foundTS := false
 		tsVal := uint32(0)
@@ -748,12 +748,6 @@ func TCPTimestampChecker(wantTS bool, wantTSVal uint32, wantTSEcr uint32) Transp
 	}
 }
 
-// TCPNoSACKBlockChecker creates a checker that verifies that the segment does
-// not contain any SACK blocks in the TCP options.
-func TCPNoSACKBlockChecker() TransportChecker {
-	return TCPSACKBlockChecker(nil)
-}
-
 // TCPSACKBlockChecker creates a checker that verifies that the segment does
 // contain the specified SACK blocks in the TCP options.
 func TCPSACKBlockChecker(sackBlocks []header.SACKBlock) TransportChecker {
@@ -765,7 +759,7 @@ func TCPSACKBlockChecker(sackBlocks []header.SACKBlock) TransportChecker {
 		}
 		var gotSACKBlocks []header.SACKBlock
 
-		opts := []byte(tcp.Options())
+		opts := tcp.Options()
 		limit := len(opts)
 		for i := 0; i < limit; {
 			switch opts[i] {

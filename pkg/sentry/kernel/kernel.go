@@ -306,9 +306,6 @@ type InitKernelArgs struct {
 	// FeatureSet is the emulated CPU feature set.
 	FeatureSet *cpuid.FeatureSet
 
-	// Timekeeper manages time for all tasks in the system.
-	Timekeeper *Timekeeper
-
 	// RootUserNamespace is the root user namespace.
 	RootUserNamespace *auth.UserNamespace
 
@@ -348,29 +345,34 @@ type InitKernelArgs struct {
 	PIDNamespace *PIDNamespace
 }
 
+// SetTimekeeper sets Kernel.timekeeper. SetTimekeeper must be called before
+// Init.
+func (k *Kernel) SetTimekeeper(tk *Timekeeper) {
+	k.timekeeper = tk
+}
+
 // Init initialize the Kernel with no tasks.
 //
 // Callers must manually set Kernel.Platform and call Kernel.SetMemoryFile
-// before calling Init.
+// and Kernel.SetTimekeeper before calling Init.
 func (k *Kernel) Init(args InitKernelArgs) error {
 	if args.FeatureSet == nil {
-		return fmt.Errorf("FeatureSet is nil")
+		return fmt.Errorf("args.FeatureSet is nil")
 	}
-	if args.Timekeeper == nil {
-		return fmt.Errorf("Timekeeper is nil")
+	if k.timekeeper == nil {
+		return fmt.Errorf("timekeeper is nil")
 	}
-	if args.Timekeeper.clocks == nil {
+	if k.timekeeper.clocks == nil {
 		return fmt.Errorf("must call Timekeeper.SetClocks() before Kernel.Init()")
 	}
 	if args.RootUserNamespace == nil {
-		return fmt.Errorf("RootUserNamespace is nil")
+		return fmt.Errorf("args.RootUserNamespace is nil")
 	}
 	if args.ApplicationCores == 0 {
-		return fmt.Errorf("ApplicationCores is 0")
+		return fmt.Errorf("args.ApplicationCores is 0")
 	}
 
 	k.featureSet = args.FeatureSet
-	k.timekeeper = args.Timekeeper
 	k.tasks = newTaskSet(args.PIDNamespace)
 	k.rootUserNamespace = args.RootUserNamespace
 	k.rootUTSNamespace = args.RootUTSNamespace
@@ -395,8 +397,8 @@ func (k *Kernel) Init(args InitKernelArgs) error {
 	}
 	k.extraAuxv = args.ExtraAuxv
 	k.vdso = args.Vdso
-	k.realtimeClock = &timekeeperClock{tk: args.Timekeeper, c: sentrytime.Realtime}
-	k.monotonicClock = &timekeeperClock{tk: args.Timekeeper, c: sentrytime.Monotonic}
+	k.realtimeClock = &timekeeperClock{tk: k.timekeeper, c: sentrytime.Realtime}
+	k.monotonicClock = &timekeeperClock{tk: k.timekeeper, c: sentrytime.Monotonic}
 	k.futexes = futex.NewManager()
 	k.netlinkPorts = port.New()
 	k.ptraceExceptions = make(map[*Task]*Task)
@@ -654,12 +656,12 @@ func (k *Kernel) invalidateUnsavableMappings(ctx context.Context) error {
 	defer k.tasks.mu.RUnlock()
 	for t := range k.tasks.Root.tids {
 		// We can skip locking Task.mu here since the kernel is paused.
-		if mm := t.image.MemoryManager; mm != nil {
-			if _, ok := invalidated[mm]; !ok {
-				if err := mm.InvalidateUnsavable(ctx); err != nil {
+		if memMgr := t.image.MemoryManager; memMgr != nil {
+			if _, ok := invalidated[memMgr]; !ok {
+				if err := memMgr.InvalidateUnsavable(ctx); err != nil {
 					return err
 				}
-				invalidated[mm] = struct{}{}
+				invalidated[memMgr] = struct{}{}
 			}
 		}
 		// I really wish we just had a sync.Map of all MMs...
@@ -1553,22 +1555,23 @@ func (k *Kernel) SetSaveError(err error) {
 
 var _ tcpip.Clock = (*Kernel)(nil)
 
-// NowNanoseconds implements tcpip.Clock.NowNanoseconds.
-func (k *Kernel) NowNanoseconds() int64 {
-	now, err := k.timekeeper.GetTime(sentrytime.Realtime)
+// Now implements tcpip.Clock.NowNanoseconds.
+func (k *Kernel) Now() time.Time {
+	nsec, err := k.timekeeper.GetTime(sentrytime.Realtime)
 	if err != nil {
-		panic("Kernel.NowNanoseconds: " + err.Error())
+		panic("timekeeper.GetTime(sentrytime.Realtime): " + err.Error())
 	}
-	return now
+	return time.Unix(0, nsec)
 }
 
 // NowMonotonic implements tcpip.Clock.NowMonotonic.
-func (k *Kernel) NowMonotonic() int64 {
-	now, err := k.timekeeper.GetTime(sentrytime.Monotonic)
+func (k *Kernel) NowMonotonic() tcpip.MonotonicTime {
+	nsec, err := k.timekeeper.GetTime(sentrytime.Monotonic)
 	if err != nil {
-		panic("Kernel.NowMonotonic: " + err.Error())
+		panic("timekeeper.GetTime(sentrytime.Monotonic): " + err.Error())
 	}
-	return now
+	var mt tcpip.MonotonicTime
+	return mt.Add(time.Duration(nsec) * time.Nanosecond)
 }
 
 // AfterFunc implements tcpip.Clock.AfterFunc.
@@ -1783,7 +1786,7 @@ func (k *Kernel) EmitUnimplementedEvent(ctx context.Context) {
 	})
 
 	t := TaskFromContext(ctx)
-	k.unimplementedSyscallEmitter.Emit(&uspb.UnimplementedSyscall{
+	_, _ = k.unimplementedSyscallEmitter.Emit(&uspb.UnimplementedSyscall{
 		Tid:       int32(t.ThreadID()),
 		Registers: t.Arch().StateData().Proto(),
 	})
@@ -1874,7 +1877,7 @@ func (k *Kernel) ReleaseCgroupHierarchy(hid uint32) {
 			return
 		}
 		t.mu.Lock()
-		for cg, _ := range t.cgroups {
+		for cg := range t.cgroups {
 			if cg.HierarchyID() == hid {
 				t.leaveCgroupLocked(cg)
 			}

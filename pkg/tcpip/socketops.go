@@ -222,7 +222,7 @@ type SocketOptions struct {
 	getReceiveBufferLimits GetReceiveBufferLimits `state:"manual"`
 
 	// receiveBufferSize determines the receive buffer size for this socket.
-	receiveBufferSize int64
+	receiveBufferSize atomicbitops.AlignedAtomicInt64
 
 	// mu protects the access to the below fields.
 	mu sync.Mutex `state:"nosave"`
@@ -601,9 +601,10 @@ func (so *SocketOptions) GetBindToDevice() int32 {
 	return atomic.LoadInt32(&so.bindToDevice)
 }
 
-// SetBindToDevice sets value for SO_BINDTODEVICE option.
+// SetBindToDevice sets value for SO_BINDTODEVICE option. If bindToDevice is
+// zero, the socket device binding is removed.
 func (so *SocketOptions) SetBindToDevice(bindToDevice int32) Error {
-	if !so.handler.HasNIC(bindToDevice) {
+	if bindToDevice != 0 && !so.handler.HasNIC(bindToDevice) {
 		return &ErrUnknownDevice{}
 	}
 
@@ -653,13 +654,13 @@ func (so *SocketOptions) SetSendBufferSize(sendBufferSize int64, notify bool) {
 
 // GetReceiveBufferSize gets value for SO_RCVBUF option.
 func (so *SocketOptions) GetReceiveBufferSize() int64 {
-	return atomic.LoadInt64(&so.receiveBufferSize)
+	return so.receiveBufferSize.Load()
 }
 
 // SetReceiveBufferSize sets value for SO_RCVBUF option.
 func (so *SocketOptions) SetReceiveBufferSize(receiveBufferSize int64, notify bool) {
 	if !notify {
-		atomic.StoreInt64(&so.receiveBufferSize, receiveBufferSize)
+		so.receiveBufferSize.Store(receiveBufferSize)
 		return
 	}
 
@@ -684,8 +685,8 @@ func (so *SocketOptions) SetReceiveBufferSize(receiveBufferSize int64, notify bo
 		v = math.MaxInt32
 	}
 
-	oldSz := atomic.LoadInt64(&so.receiveBufferSize)
+	oldSz := so.receiveBufferSize.Load()
 	// Notify endpoint about change in buffer size.
 	newSz := so.handler.OnSetReceiveBufferSize(v, oldSz)
-	atomic.StoreInt64(&so.receiveBufferSize, newSz)
+	so.receiveBufferSize.Store(newSz)
 }
